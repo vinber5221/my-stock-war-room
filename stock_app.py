@@ -1,86 +1,99 @@
 import streamlit as st
 import pandas as pd
-import requests
+import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime
 
 # 1. 頁面配置
-st.set_page_config(page_title="證交所官方直連戰情室", layout="wide")
+st.set_page_config(page_title="100萬實戰-階段一", layout="wide", initial_sidebar_state="expanded")
 
-# 初始化帳戶邏輯 (100萬實戰)
+# 初始化帳戶
 if 'balance' not in st.session_state: st.session_state.balance = 1000000.0
 if 'position' not in st.session_state: st.session_state.position = 0
 if 'buy_price' not in st.session_state: st.session_state.buy_price = 0.0
 
-# --- 【數據引擎：直連證交所 OpenAPI】 ---
-@st.cache_data(ttl=60) # 每分鐘自動更新一次
-def get_realtime_twse(code):
-    try:
-        # 直接抓取證交所全市場每日行情
-        url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-        res = requests.get(url, timeout=10)
-        data = res.json()
-        df = pd.DataFrame(data)
-        
-        # 篩選出爸爸要的這檔股票
-        target_df = df[df['Code'] == code]
-        
-        if not target_df.empty:
-            # 強制清洗數據，確保價格是真實數字 (去掉逗號)
-            price = float(str(target_df.iloc[0]['ClosingPrice']).replace(',', ''))
-            name = target_df.iloc[0]['Name']
-            change = float(str(target_df.iloc[0]['Change']).replace(',', ''))
-            return {"price": price, "name": name, "change": change}
-        return None
-    except:
-        return None
-
 # --- 【左側指揮中心】 ---
-st.sidebar.header("🕹️ 指揮中心")
-target_code = st.sidebar.text_input("輸入台股代碼", value="2330").strip()
-st.sidebar.divider()
-st.sidebar.metric("💰 剩餘現金", f"${st.session_state.balance:,.0f}")
-st.sidebar.write(f"💼 目前持倉: {st.session_state.position} 張")
-
-if st.sidebar.button("♻️ 刷新官方數據"):
-    st.cache_data.clear()
-    st.rerun()
-
-# --- 【主畫面：官方真實行情】 ---
-info = get_realtime_twse(target_code)
-
-if info:
-    st.title(f"🛡️ {info['name']} ({target_code}) 實戰監控")
+with st.sidebar:
+    st.header("🕹️ 指揮中心")
+    target_code = st.text_input("🔍 輸入台股代碼", value="2330").strip()
     
-    cur_p = info['price']
+    # K線週期切換：這就是你要求的年、月、週、日
+    time_frame = st.radio(
+        "選擇查看週期",
+        ('日 (近1年)', '週 (近2年)', '月 (近5年)', '年 (全部)'),
+        index=0
+    )
     
-    # 看板：顯示最真實的收盤價
-    c1, c2, c3 = st.columns(3)
-    c1.metric("官方真實價格", f"{cur_p:,.2f}", delta=f"{info['change']}")
-    
-    # 計算損益
-    unrealized = (cur_p - st.session_state.buy_price) * st.session_state.position * 1000 if st.session_state.position > 0 else 0
-    c2.metric("帳面損益", f"{unrealized:,.0f}", delta=f"{(unrealized/1000000)*100:.2f}%" if st.session_state.position > 0 else None)
-    c3.metric("持倉成本", f"{st.session_state.buy_price:,.2f}")
-
-    # 模擬交易
     st.divider()
-    b1, b2 = st.columns(2)
-    with b1:
-        if st.button(f"🔴 以 {cur_p} 買進 1 張 (1000股)", use_container_width=True):
-            st.session_state.balance -= cur_p * 1000
-            st.session_state.position += 1
-            st.session_state.buy_price = cur_p
-            st.rerun()
-    with b2:
-        if st.button("🟢 全數賣出平倉", use_container_width=True):
-            st.session_state.balance += (cur_p * st.session_state.position * 1000)
-            st.session_state.position = 0
-            st.session_state.buy_price = 0.0
-            st.rerun()
+    st.metric("💰 剩餘現金", f"${st.session_state.balance:,.0f}")
+    st.write(f"💼 持倉數量: {st.session_state.position} 張")
+    
+    if st.button("♻️ 刷新數據"):
+        st.rerun()
 
-    # 備註說明
-    st.caption("註：此數據直接連線台灣證交所 OpenAPI，反映當前最新官方收盤價格。")
+# --- 【數據抓取邏輯】 ---
+# 根據按鈕選擇，決定 yfinance 抓取的時間範圍
+period_map = {
+    '日 (近1年)': '1y',
+    '週 (近2年)': '2y',
+    '月 (近5年)': '5y',
+    '年 (全部)': 'max'
+}
+interval_map = {
+    '日 (近1年)': '1d',
+    '週 (近2年)': '1wk',
+    '月 (近5年)': '1mo',
+    '年 (全部)': '1mo' # yfinance '年'單位通常以月K呈現較清楚
+}
 
-else:
-    st.error("❌ 找不到該代碼，或證交所 API 暫時繁忙。請確認代碼是否正確（如 2330）。")
+symbol = f"{target_code}.TW" if target_code != "^TWII" else "^TWII"
+
+try:
+    # 抓取數據 (使用 auto_adjust=False 確保價格真實，不被除權息干擾)
+    df = yf.download(symbol, period=period_map[time_frame], interval=interval_map[time_frame], auto_adjust=False)
+    
+    # 強制攤平索引，防止抓錯價格
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    if not df.empty:
+        cur_p = round(float(df['Close'].iloc[-1]), 2)
+        
+        # --- 上方實時數據看板 ---
+        st.title(f"📊 {target_code} 實戰看板 ({time_frame})")
+        
+        # 這裡預留位置，下一階段我們會加入 EPS, ROE
+        c1, c2, c3 = st.columns(3)
+        c1.metric("當前成交價", f"{cur_p:,.2f}")
+        
+        unrealized = (cur_p - st.session_state.buy_price) * st.session_state.position * 1000 if st.session_state.position > 0 else 0
+        c2.metric("帳面損益", f"{unrealized:,.0f}", delta=f"{(unrealized/1000000)*100:.2f}%" if st.session_state.position > 0 else None)
+        c3.metric("平均成本", f"{st.session_state.buy_price:,.2f}")
+
+        # --- 專業 K 線圖 (具備縮放功能) ---
+        fig = go.Figure(data=[go.Candlestick(
+            x=df.index,
+            open=df['Open'], high=df['High'],
+            low=df['Low'], close=df['Close'],
+            name='K線'
+        )])
+        
+        # 繪製成本線
+        if st.session_state.position > 0:
+            fig.add_hline(y=st.session_state.buy_price, line_dash="dash", line_color="red", annotation_text="我的成本")
+
+        # 圖表設定：加入伸縮滑桿 (Range Slider)
+        fig.update_layout(
+            height=600,
+            template="plotly_dark",
+            xaxis_rangeslider_visible=True, # 底部的伸縮滑桿
+            margin=dict(l=10, r=10, t=10, b=10),
+            yaxis_title="價格 (TWD)"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.error("❌ 找不到代碼數據，請確認輸入正確（例如：2330）。")
+
+except Exception as e:
+    st.error(f"系統啟動中... 請稍候。")
