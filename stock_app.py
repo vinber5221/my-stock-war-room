@@ -21,7 +21,6 @@ def get_final_data():
         c_url = f"https://www.twse.com.tw/fund/T86?response=csv&date={today_str}&selectType=ALL"
         c_res = requests.get(c_url, headers=headers, timeout=20)
         c_lines = c_res.text.split('\n')
-        # 移除 CSV 的頭尾雜訊
         c_data = [l for l in c_lines if len(l.split('","')) > 10]
         c_df = pd.read_csv(io.StringIO('\n'.join(c_data)))
         
@@ -29,18 +28,15 @@ def get_final_data():
         p_url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data"
         p_df = pd.read_csv(p_url)
         
-        # C. 整理與合併 (關鍵：過濾掉非個股)
+        # C. 整理與合併
         p_df = p_df[['證券代號', '證券名稱', '收盤價', '漲跌價']].rename(columns={'證券代號':'Code', '證券名稱':'Name'})
-        c_df = c_df.iloc[:, [0, 7, 10]] # 取 證券代號, 外資買賣超, 投信買賣超
+        c_df = c_df.iloc[:, [0, 7, 10]]
         c_df.columns = ['Code', 'Foreign', 'Trust']
         
-        # 清洗代號中的引號
         c_df['Code'] = c_df['Code'].astype(str).str.replace('=', '').str.replace('"', '')
         p_df['Code'] = p_df['Code'].astype(str)
         
         merged = pd.merge(p_df, c_df, on='Code')
-        
-        # 轉換數字
         for col in ['收盤價', '漲跌價', 'Foreign', 'Trust']:
             merged[col] = pd.to_numeric(merged[col].astype(str).str.replace(',', ''), errors='coerce')
         
@@ -49,7 +45,7 @@ def get_final_data():
     except Exception as e:
         return str(e)
 
-# 3. 介面
+# 3. 介面呈現
 st.title("🛡️ 100萬實戰-終極穩定版")
 st.subheader(f"💰 目前餘額：${st.session_state.balance:,.0f}")
 
@@ -58,16 +54,25 @@ if st.button("🚀 啟動終極掃描 (直連 CSV 通道)"):
         df = get_final_data()
         
         if isinstance(df, str):
-            st.warning("⚠️ 數據尚未出爐。提示：法人籌碼通常在 15:00-15:30 之間發佈。")
+            st.warning("⚠️ 數據尚未出爐或解析錯誤，請稍後再試。")
         else:
-            # 篩選：外資買 > 0 且 投信買 > 0 且 漲幅 > 2%
             targets = df[(df['Foreign'] > 0) & (df['Trust'] > 0) & (df['ChangePct'] >= 2.0)].sort_values(by='ChangePct', ascending=False)
             
             if not targets.empty:
                 st.success(f"🎯 成功！偵測到 {len(targets)} 檔法人鎖碼股")
                 for _, row in targets.head(20).iterrows():
                     with st.container():
+                        # 這裡修正了括號漏掉的問題
                         st.markdown(f"""<div class="stock-card">
                         <h3 style='color:#00ffc8; margin:0;'>{row['Name']} ({row['Code']})</h3>
                         <p style='font-size:1.2rem; margin:10px 0;'>🔥 漲幅：{row['ChangePct']:.2f}% | 價：{row['收盤價']}</p>
-                        <p style='color:#aaa; font-size:0.9rem;'>外資買：{int(row['Foreign']/1000
+                        <p style='color:#aaa; font-size:0.9rem;'>外資買：{int(row['Foreign']/1000):,}張 / 投信買：{int(row['Trust']/1000):,}張</p>
+                        </div>""", unsafe_allow_html=True)
+                        if st.button(f"🛒 模擬買進 1 張 {row['Name']}", key=row['Code']):
+                            cost = row['收盤價'] * 1000
+                            if st.session_state.balance >= cost:
+                                st.session_state.balance -= cost
+                                st.success(f"✅ 已買入 {row['Name']}，餘額 ${st.session_state.balance:,.0f}")
+                                st.rerun()
+            else:
+                st.info("目前尚無符合「雙買+漲2%」的標的。")
