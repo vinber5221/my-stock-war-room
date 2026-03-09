@@ -1,38 +1,47 @@
 import streamlit as st
 import pandas as pd
 import requests
+import io
 from datetime import datetime
 
-# 1. 介面優化
-st.set_page_config(page_title="爸爸的 100 萬實戰選股器", layout="centered")
+# 1. 頁面優化
+st.set_page_config(page_title="100萬實戰-終極穩定版", layout="centered")
 if 'balance' not in st.session_state: st.session_state.balance = 1000000.0
-if 'portfolio' not in st.session_state: st.session_state.portfolio = {}
 
 st.markdown("""<style>.stApp { background-color: #0e1117; color: white; } .stock-card { background-color: #161b22; border: 1px solid #30363d; padding: 20px; border-radius: 12px; margin-bottom: 15px; }</style>""", unsafe_allow_html=True)
 
-# 2. 繞道抓取引擎 (直接抓官網表格，不走 API)
-@st.cache_data(ttl=600)
-def get_bypass_data():
+# 2. 終極數據引擎 (抓取法人 CSV + 行情 CSV)
+@st.cache_data(ttl=300)
+def get_final_data():
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    today_str = datetime.now().strftime('%Y%m%d')
+    
     try:
-        # 直接抓取今日行情與三大法人匯總表
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        # A. 抓取法人買賣超 (CSV 格式)
+        c_url = f"https://www.twse.com.tw/fund/T86?response=csv&date={today_str}&selectType=ALL"
+        c_res = requests.get(c_url, headers=headers, timeout=20)
+        c_lines = c_res.text.split('\n')
+        # 移除 CSV 的頭尾雜訊
+        c_data = [l for l in c_lines if len(l.split('","')) > 10]
+        c_df = pd.read_csv(io.StringIO('\n'.join(c_data)))
         
-        # 抓行情 (BW001L 格式)
-        p_url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json"
-        p_res = requests.get(p_url, headers=headers, timeout=20).json()
-        p_df = pd.DataFrame(p_res['data'], columns=p_res['fields'])
+        # B. 抓取今日行情 (CSV 格式)
+        p_url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data"
+        p_df = pd.read_csv(p_url)
         
-        # 抓法人 (T86 格式)
-        c_url = f"https://www.twse.com.tw/fund/T86?response=json&date={datetime.now().strftime('%Y%m%d')}&selectType=ALL"
-        c_res = requests.get(c_url, headers=headers, timeout=20).json()
-        c_df = pd.DataFrame(c_res['data'], columns=c_res['fields'])
-
-        # 清洗：統一欄位名稱
+        # C. 整理與合併 (關鍵：過濾掉非個股)
         p_df = p_df[['證券代號', '證券名稱', '收盤價', '漲跌價']].rename(columns={'證券代號':'Code', '證券名稱':'Name'})
-        c_df = c_df[['證券代號', '外陸資買賣超股數', '投信買賣超股數']].rename(columns={'證券代號':'Code'})
+        c_df = c_df.iloc[:, [0, 7, 10]] # 取 證券代號, 外資買賣超, 投信買賣超
+        c_df.columns = ['Code', 'Foreign', 'Trust']
+        
+        # 清洗代號中的引號
+        c_df['Code'] = c_df['Code'].astype(str).str.replace('=', '').str.replace('"', '')
+        p_df['Code'] = p_df['Code'].astype(str)
         
         merged = pd.merge(p_df, c_df, on='Code')
-        for col in ['收盤價', '漲跌價', '外陸資買賣超股數', '投信買賣超股數']:
+        
+        # 轉換數字
+        for col in ['收盤價', '漲跌價', 'Foreign', 'Trust']:
             merged[col] = pd.to_numeric(merged[col].astype(str).str.replace(',', ''), errors='coerce')
         
         merged['ChangePct'] = (merged['漲跌價'] / (merged['收盤價'] - merged['漲跌價'])) * 100
@@ -41,31 +50,24 @@ def get_bypass_data():
         return str(e)
 
 # 3. 介面
-st.title("🛡️ 100 萬模擬實戰 (繞道穩贏版)")
-st.write(f"💰 現金餘額：${st.session_state.balance:,.0f}")
+st.title("🛡️ 100萬實戰-終極穩定版")
+st.subheader(f"💰 目前餘額：${st.session_state.balance:,.0f}")
 
-if st.button("🚀 強制連線掃描"):
-    with st.spinner("正在破解塞車路段，直連證交所數據庫..."):
-        df = get_bypass_data()
+if st.button("🚀 啟動終極掃描 (直連 CSV 通道)"):
+    with st.spinner("正在讀取證交所原始數據檔..."):
+        df = get_final_data()
         
         if isinstance(df, str):
-            st.error(f"連線失敗：證交所今日數據尚未出爐或維護中。")
-            st.info("💡 爸爸，這代表官方還沒放資料出來，我們 15:30 再按一次！")
+            st.warning("⚠️ 數據尚未出爐。提示：法人籌碼通常在 15:00-15:30 之間發佈。")
         else:
-            targets = df[(df['外陸資買賣超股數'] > 0) & (df['投信買賣超股數'] > 0) & (df['ChangePct'] >= 2.0)]
+            # 篩選：外資買 > 0 且 投信買 > 0 且 漲幅 > 2%
+            targets = df[(df['Foreign'] > 0) & (df['Trust'] > 0) & (df['ChangePct'] >= 2.0)].sort_values(by='ChangePct', ascending=False)
             
             if not targets.empty:
-                st.success(f"🎯 成功繞道！找到 {len(targets)} 檔強勢股：")
-                for _, row in targets.head(15).iterrows():
+                st.success(f"🎯 成功！偵測到 {len(targets)} 檔法人鎖碼股")
+                for _, row in targets.head(20).iterrows():
                     with st.container():
-                        st.markdown(f"""<div class="stock-card"><h3 style='color:#00ffc8;'>{row['Name']} ({row['Code']})</h3>
-                        <b>漲幅：{row['ChangePct']:.2f}%</b> | 價：{row['收盤價']}<br>
-                        <small>外資買：{int(row['外陸資買賣超股數']/1000)}張 / 投信買：{int(row['投信買賣超股數']/1000)}張</small></div>""", unsafe_allow_html=True)
-                        if st.button(f"🛒 買進 {row['Name']}", key=row['Code']):
-                            cost = row['收盤價'] * 1000
-                            if st.session_state.balance >= cost:
-                                st.session_state.balance -= cost
-                                st.toast(f"✅ 已買入 {row['Name']}")
-                                st.rerun()
-            else:
-                st.warning("數據已連線，但今日尚未出現符合「雙買+大漲」的股票。")
+                        st.markdown(f"""<div class="stock-card">
+                        <h3 style='color:#00ffc8; margin:0;'>{row['Name']} ({row['Code']})</h3>
+                        <p style='font-size:1.2rem; margin:10px 0;'>🔥 漲幅：{row['ChangePct']:.2f}% | 價：{row['收盤價']}</p>
+                        <p style='color:#aaa; font-size:0.9rem;'>外資買：{int(row['Foreign']/1000
