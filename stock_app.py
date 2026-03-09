@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
 import requests
+import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime
 
 # 1. 頁面配置
-st.set_page_config(page_title="證交所直連-實戰戰情室", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="AI 股票完全體-全情報版", layout="wide", initial_sidebar_state="expanded")
 
 # 初始化帳戶
 if 'balance' not in st.session_state: st.session_state.balance = 1000000.0
@@ -13,21 +14,17 @@ if 'position' not in st.session_state: st.session_state.position = 0
 if 'buy_price' not in st.session_state: st.session_state.buy_price = 0.0
 if 'trade_log' not in st.session_state: st.session_state.trade_log = []
 
-# --- 【數據引擎：直連證交所 OpenAPI】 ---
+# --- 【數據引擎：證交所直連】 ---
 @st.cache_data(ttl=3600)
 def get_twse_data():
     try:
-        # 抓取行情與籌碼 (TWSE OpenAPI)
         p_res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=10).json()
         c_res = requests.get("https://openapi.twse.com.tw/v1/fund/T86_ALL", timeout=10).json()
         p_df, c_df = pd.DataFrame(p_res), pd.DataFrame(c_res)
-        
-        # 數值清洗
         for df in [p_df, c_df]:
             for col in df.columns:
-                if any(k in col for k in ['Price', 'Change', 'Diff', 'Buy', 'Sell']):
+                if any(k in col for k in ['Price', 'Change']):
                     df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
-        
         merged = pd.merge(p_df, c_df, on='Code', suffixes=('', '_chip'))
         merged['ChangePct'] = (merged['Change'] / (merged['ClosingPrice'] - merged['Change'])) * 100
         return merged
@@ -36,51 +33,73 @@ def get_twse_data():
 # --- 【左側指揮中心】 ---
 with st.sidebar:
     st.header("🕹️ 指揮中心")
-    st.metric("💰 剩餘現金", f"${st.session_state.balance:,.0f}")
-    target_code = st.text_input("🔍 輸入演練代碼", value="2330")
-    if st.button("🔄 刷新數據"):
+    st.metric("💰 帳戶餘額", f"${st.session_state.balance:,.0f}")
+    target_code = st.text_input("🔍 代碼演練", value="2330").strip()
+    st.divider()
+    if st.button("♻️ 強制重整數據"):
         st.cache_data.clear()
         st.rerun()
 
 # --- 【右側主畫面】 ---
-st.title("🛡️ 100萬實戰：證交所直連版")
+st.title("🛡️ 100萬實戰：全情報戰情室")
+
 all_data = get_twse_data()
 
 if all_data is not None:
-    # 第一區：法人鎖碼雷達
-    with st.expander("🚀 今日法人同步鎖碼名單", expanded=True):
+    # 第一層：籌碼鎖碼雷達
+    with st.expander("🚀 今日法人同步鎖碼名單", expanded=False):
         radar = all_data[(all_data['ForeignInvestorBuySellDiff'] > 0) & 
                          (all_data['InvestmentTrustBuySellDiff'] > 0) & 
                          (all_data['ChangePct'] >= 2.0)].sort_values(by='ChangePct', ascending=False)
-        st.dataframe(radar[['Code', 'Name', 'ClosingPrice', 'ChangePct', 'ForeignInvestorBuySellDiff', 'InvestmentTrustBuySellDiff']].head(10), hide_index=True)
+        st.dataframe(radar[['Code', 'Name', 'ClosingPrice', 'ChangePct', 'ForeignInvestorBuySellDiff']].head(10), hide_index=True)
 
-    # 第二區：實戰交易
     st.divider()
-    stock = all_data[all_data['Code'] == target_code]
-    if not stock.empty:
-        row = stock.iloc[0]
-        cur_p = row['ClosingPrice']
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("今日收盤", f"{cur_p}")
-        c2.metric("漲跌幅", f"{row['ChangePct']:.2f}%")
-        c3.metric("外資買賣(張)", f"{int(row['ForeignInvestorBuySellDiff']/1000):,}")
 
-        # 模擬下單
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button(f"🔴 買進 1 張 (${cur_p})", use_container_width=True):
+    # 第二層：個股情報 (EPS, ROE, 毛利)
+    symbol = f"{target_code}.TW" if target_code != "^TWII" else "^TWII"
+    stock_tool = yf.Ticker(symbol)
+    
+    # 抓取 K 線數據
+    hist = yf.download(symbol, period="1d", interval="5m", timeout=5)
+    
+    if not hist.empty:
+        cur_p = float(hist['Close'].iloc[-1])
+        
+        # 顯示財報數據
+        try:
+            info = stock_tool.info
+            st.subheader(f"📊 {info.get('shortName', target_code)} 關鍵情報")
+            i1, i2, i3, i4 = st.columns(4)
+            i1.metric("當前股價", f"{cur_p:.2f}")
+            i2.metric("🧬 EPS", f"{info.get('trailingEps', 'N/A')}")
+            i3.metric("💰 毛利率", f"{info.get('grossMargins', 0)*100:.2f}%")
+            i4.metric("📈 ROE (投報率)", f"{info.get('returnOnEquity', 0)*100:.2f}%")
+        except:
+            st.warning("基本面情報讀取中...")
+
+        # 第三層：交易執行
+        st.write("---")
+        t1, t2, t3 = st.columns([1, 1, 2])
+        with t1:
+            if st.button(f"🔴 買進 1 張", use_container_width=True):
                 st.session_state.balance -= cur_p * 1000
                 st.session_state.position += 1
                 st.session_state.buy_price = cur_p
                 st.rerun()
-        with b2:
+        with t2:
             if st.button("🟢 全數賣出", use_container_width=True):
                 st.session_state.balance += (cur_p * st.session_state.position * 1000)
-                st.session_state.position = 0
+                st.session_state.position = 0; st.session_state.buy_price = 0.0
                 st.rerun()
-        
-        unrealized = (cur_p - st.session_state.buy_price) * st.session_state.position * 1000 if st.session_state.position > 0 else 0
-        st.metric("當前損益", f"{unrealized:,.0f}", delta=f"{(unrealized/1000000)*100:.2f}%" if unrealized != 0 else None)
+        with t3:
+            unrealized = (cur_p - st.session_state.buy_price) * st.session_state.position * 1000 if st.session_state.position > 0 else 0
+            st.metric("持倉損益", f"{unrealized:,.0f}", delta=f"{(unrealized/1000000)*100:.2f}%" if unrealized != 0 else None)
+
+        # 第四層：K 線圖
+        fig = go.Figure(data=[go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'])])
+        if st.session_state.position > 0:
+            fig.add_hline(y=st.session_state.buy_price, line_dash="dash", line_color="red", annotation_text="成本線")
+        fig.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("請輸入正確股票代碼")
+        st.error("找不到該代碼行情，請確認輸入是否正確。")
